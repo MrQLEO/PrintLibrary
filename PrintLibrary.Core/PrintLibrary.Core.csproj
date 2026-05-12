@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <RootNamespace>PrintLibrary</RootNamespace>
+    <AssemblyName>PrintLibrary.Core</AssemblyName>
+    <Description>跨平台企业打印类库，基于 SkiaSharp，支持标签/报表/条码打印</Description>
+    <Version>1.0.0</Version>
+    <!-- 允许不安全代码（BitMatrix 光栅化中的 unsafe 指针操作） -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- SkiaSharp 跨平台 2D 绘图引擎 -->
+    <PackageReference Include="SkiaSharp" Version="3.119.2" />
+    <!-- Linux 本机资源（无额外系统库依赖） -->
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="3.119.2" />
+    <!-- macOS 本机资源 -->
+    <PackageReference Include="SkiaSharp.NativeAssets.macOS" Version="3.119.2" />
+    <!-- 条码生成库 -->
+    <PackageReference Include="ZXing.Net" Version="0.16.11" />
+    <!-- JSON 序列化（.NET 6+ 内置，但显式引用保证版本） -->
+    <PackageReference Include="System.Text.Json" Version="10.0.7" />
+    <!-- 打印机 API（仅 Windows，Linux/macOS 通过 CUPS 命令行） -->
+    <PackageReference Include="System.Drawing.Common" Version="10.0.7" Condition="$([MSBuild]::IsOSPlatform('windows'))" />
+    <!-- PdfSharp 向量 PDF 输出（字体子集化好，CJK PDF 体积小） -->
+    <PackageReference Include="PdfSharpCore" Version="1.3.67" />
+  </ItemGroup>
+
+</Project>

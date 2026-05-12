@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="PrintLibrary.Core/PrintLibrary.Core.csproj" />
+  <Project Path="PrintLibrary.Demo/PrintLibrary.Demo.csproj" />
+</Solution>

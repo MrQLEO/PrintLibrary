@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>PrintLibrary.Demo</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 引用核心类库 -->
+    <ProjectReference Include="..\PrintLibrary.Core\PrintLibrary.Core.csproj" />
+  </ItemGroup>
+
+</Project>
