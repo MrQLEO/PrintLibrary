@@ -241,7 +241,7 @@ a4Template.Add(new TableElement
 });
 
 // 汇总信息
-float tableBottom = 55f + 8f * 6; // 表头 + 5行数据 = 6行 × 8mm
+float tableBottom = 55f + 8f * 7; // 表头 + 6行数据 = 7行 × 8mm
 a4Template.Add(new TextElement
 {
     X = 120f, Y = tableBottom + 3f, Width = 85f, Height = 7f,
@@ -384,7 +384,7 @@ try
         //    .Set("Date",        DateTime.Today);
 
         // 不显示对话框，直接打印到默认打印机
-        printer.Print(a4Template, a4Data, new PrintOptions {PrinterName= "Microsoft Print to PDF",  ShowPrintDialog = false });
+        printer.Print(a4Template, a4Data, new PrintOptions {PrinterName= "HP LaserJet MFP M232dw (AF51EA)",  ShowPrintDialog = false });
         Console.WriteLine("  [OK] 打印任务已发送到默认打印机。");
     }
 }

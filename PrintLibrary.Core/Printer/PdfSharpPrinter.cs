@@ -55,12 +55,11 @@ namespace PrintLibrary.Printer
         /// <summary>
         /// 字体回退链：当主字体缺少某字符的 glyph 时，按此顺序尝试回退字体。
         /// <para>PdfSharp 不像 SkiaSharp 那样自动回退字体，遇到缺失 glyph 的字符会渲染为方框（□）。</para>
-        /// <para>默认回退链：Arial Unicode MS（覆盖极广）→ Segoe UI Symbol（覆盖大部分 Unicode 符号）→ Arial（基本拉丁）</para>
+        /// <para>默认回退链：Segoe UI Symbol（覆盖大部分 Unicode 符号）→ Arial（基本拉丁）</para>
         /// <para>用户可自定义添加更多回退字体。</para>
         /// </summary>
         public List<string> FontFallbackChain { get; } = new()
         {
-            "Arial Unicode MS",
             "Segoe UI Symbol",
             "Arial"
         };
@@ -772,31 +771,19 @@ namespace PrintLibrary.Printer
         private static bool IsSpecialSymbolChar(char c)
         {
             // 以下 Unicode 范围的字符在 CJK 字体（SimHei、SimSun 等）中通常缺少 glyph：
-            // - Latin-1 Supplement: U+0080..U+00FF（Øø Åå Ææ ß ± ÷ © ® ° 等）
-            //   注：不含基本拉丁（U+0020..U+007F），那些字符所有字体都有
-            // - Latin Extended-A/B: U+0100..U+024F
-            // - General Punctuation: U+2000..U+206F（— – † ‡ • … ‰ ※ 等）
-            // - Currency Symbols: U+20A0..U+20CF（€ ₹ ₽ ₩ 等，注意 ¥ U+00A5 在 Latin-1 里）
-            // - Letterlike Symbols: U+2100..U+214F（℃ ℉ № ™ ℠ © ®）
-            // - Arrows: U+2190..U+21FF（← → ↑ ↓ ⇐ ⇒）
-            // - Math Operators: U+2200..U+22FF（∀ ∂ ∃ ∑ √ ∞ ≈ ≠ ≤ ≥ × ÷）
-            // - Misc Technical: U+2300..U+23FF（⌀ ⌐ ⌠ ⌡）
-            // - Enclosed Alphanumerics: U+2460..U+24FF（① ② ⑴ ⒈）
-            // - Box Drawing: U+2500..U+257F（─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼）
-            // - Block Elements: U+2580..U+259F（▀ ▄ █ ▌ ▐）
-            // - Geometric Shapes: U+25A0..U+25FF（■ □ ▲ △ ◆ ◇ ● ○ ★ ☆）
-            // - Misc Symbols: U+2600..U+26FF（☀ ☁ ☂ ☃ ★ ☎ ☑ ✔ ✘ ♀ ♂ ♠ ♣ ♥ ♦）
-            // - Dingbats: U+2700..U+27BF（✁ ✂ ✈ ✉ ✔ ✘ ✦ ✧ ❝ ❞）
-            // - CJK Compatibility: U+3300..U+33FF（㈱ ㈲ ㈳ —— 这些 SimHei 可能也没有）
-            // - Alphabetic Presentation Forms: U+FB00..U+FB4F（连字 ﬀ ﬁ 等）
-            // - Specials: U+FFF0..U+FFFD
+            //
+            // Latin-1 Supplement (U+0080..U+00FF) 中的细分：
+            //   - U+00C0..U+00FF 中，SimHei 只有 × (U+00D7) 和 ÷ (U+00F7)，其余带重音拉丁字母均无 glyph
+            //   - U+0080..U+00BF 中，SimHei 大部分都有（如 ¥, ×, ±, °, © 等），不应回退
+            // Latin Extended-A/B (U+0100..U+024F)：SimHei 基本没有
             //
             // 注意：以下范围 CJK 字体本身就有 glyph，不需要回退：
             // - U+4E00..U+9FFF (CJK Unified Ideographs)
             // - U+FF00..U+FFEF (Halfwidth/Fullwidth Forms，如 ￥ U+FFE5)
             // - U+3000..U+303F (CJK Symbols and Punctuation)
             // - U+3040..U+30FF (Hiragana + Katakana)
-            return (c >= '\u0080' && c <= '\u024F') ||  // Latin-1 Supplement + Latin Extended
+            // - U+0080..U+00BF (Latin-1 标点符号区，SimHei 大多有 glyph)
+            return IsLatinExtendedChar(c) ||
                    (c >= '\u2000' && c <= '\u206F') ||  // General Punctuation
                    (c >= '\u20A0' && c <= '\u20CF') ||  // Currency Symbols
                    (c >= '\u2100' && c <= '\u214F') ||  // Letterlike Symbols
@@ -812,6 +799,29 @@ namespace PrintLibrary.Printer
                    (c >= '\u3300' && c <= '\u33FF') ||  // CJK Compatibility
                    (c >= '\uFB00' && c <= '\uFB4F') ||  // Alphabetic Presentation Forms
                    (c >= '\uFFF0' && c <= '\uFFFD');    // Specials
+        }
+
+        /// <summary>
+        /// 判断字符是否属于 SimHei 缺少 glyph 的 Latin 扩展范围。
+        /// Latin-1 Supplement (U+0080..U+00FF) 中，SimHei 在 U+00C0..U+00FF 段
+        /// 只有 × (U+00D7) 和 ÷ (U+00F7)，其余带重音拉丁字母（如 Ø, å, æ, ß 等）都没有 glyph。
+        /// U+0080..U+00BF 段的标点符号 SimHei 大多有 glyph，不应回退。
+        /// </summary>
+        private static bool IsLatinExtendedChar(char c)
+        {
+            // U+00C0..U+00FF（Latin-1 补充字母），排除 × (U+00D7) 和 ÷ (U+00F7)
+            if (c >= '\u00C0' && c <= '\u00FF')
+            {
+                if (c == '\u00D7' || c == '\u00F7')  // × ÷ —— SimHei 有 glyph
+                    return false;
+                return true;  // Ø, ø, å, æ, ß, À, É 等 —— SimHei 没有 glyph
+            }
+
+            // Latin Extended-A/B: U+0100..U+024F —— SimHei 基本没有
+            if (c >= '\u0100' && c <= '\u024F')
+                return true;
+
+            return false;
         }
 
         /// <summary>
