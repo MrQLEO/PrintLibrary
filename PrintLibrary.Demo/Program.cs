@@ -14,8 +14,14 @@ using PrintLibrary.Preview;
 using PrintLibrary.Printer;
 using PrintLibrary.Serialization;
 
+
 // ── 输出目录 ────────────────────────────────────────────────
+// 每次运行先清空上次的产物，避免反复调试后 output 目录堆积大量旧文件。
+// 注意：Core 库全程使用内存流（SKDynamicMemoryWStream / 直写 FileStream），
+// 本身不产生中间临时文件，这里只清理 Demo 自己生成的最终产物目录。
 string outputDir = Path.Combine(AppContext.BaseDirectory, "output");
+if (Directory.Exists(outputDir))
+    Directory.Delete(outputDir, recursive: true);
 Directory.CreateDirectory(outputDir);
 Console.WriteLine($"输出目录：{outputDir}");
 Console.WriteLine();
@@ -334,7 +340,7 @@ Console.WriteLine("=== 示例5b：PdfSharp 向量 PDF（体积对比）===");
 
 // 工单报表 - PdfSharp 版
 string a4PdfSharpPath = Path.Combine(outputDir, "work_order_pdfsharp.pdf");
-new PdfSharpPrinter { Title = "工单报表" }.SaveToFile(a4Template, a4PdfSharpPath, a4Data);
+new HybridPdfPrinter { Title = "工单报表" }.SaveToFile(a4Template, a4PdfSharpPath, a4Data);
 var a4SkiaSize = new FileInfo(a4PdfPath).Length;
 var a4PdfSharpSize = new FileInfo(a4PdfSharpPath).Length;
 Console.WriteLine($"  [OK] 工单 PdfSharp PDF 已保存：{a4PdfSharpPath}");
@@ -342,7 +348,7 @@ Console.WriteLine($"  [对比] SkiaSharp 向量 PDF: {a4SkiaSize / 1024.0:F0} KB
 
 // 条码标签 - PdfSharp 版
 string barcodePdfSharpPath = Path.Combine(outputDir, "barcode_labels_3pages_pdfsharp.pdf");
-new PdfSharpPrinter { Title = "入库条码标签" }.SaveToFile(barcodeTemplate, barcodePdfSharpPath, multiPageData);
+new HybridPdfPrinter { Title = "入库条码标签" }.SaveToFile(barcodeTemplate, barcodePdfSharpPath, multiPageData);
 var barcodeSkiaSize = new FileInfo(pdfPath).Length;
 var barcodePdfSharpSize = new FileInfo(barcodePdfSharpPath).Length;
 Console.WriteLine($"  [OK] 条码 PdfSharp PDF 已保存：{barcodePdfSharpPath}");
@@ -350,8 +356,69 @@ Console.WriteLine($"  [对比] SkiaSharp 向量 PDF: {barcodeSkiaSize / 1024.0:F
 
 // 零件清单（含 Ø 符号）- PdfSharp 版
 string partsPdfSharpPath = Path.Combine(outputDir, "parts_table_pdfsharp.pdf");
-new PdfSharpPrinter { Title = "零件清单" }.SaveToFile(tableOnlyTemplate, partsPdfSharpPath, new PrintData());
+new HybridPdfPrinter { Title = "零件清单" }.SaveToFile(tableOnlyTemplate, partsPdfSharpPath, new PrintData());
 Console.WriteLine($"  [OK] 零件清单 PdfSharp PDF 已保存：{partsPdfSharpPath}（含 Ø 符号字体回退测试）");
+
+// ═══════════════════════════════════════════════════════════
+// 示例 5c：表格合并单元格（ColSpan / RowSpan + 表头 ColSpan）
+// ═══════════════════════════════════════════════════════════
+Console.WriteLine();
+Console.WriteLine("=== 示例5c：表格合并单元格（ColSpan / RowSpan）===");
+
+var spanTemplate = new LabelTemplate
+{
+    Name = "合并单元格示例",
+    Width = 100f, Height = 70f,
+    BackgroundColor = "#FFFFFFFF"
+};
+spanTemplate.Add(new TableElement
+{
+    X = 2f, Y = 2f, Width = 96f,
+    RowHeight = 8f,
+    HeaderFontSize = 8f,
+    RowFontSize = 7f,
+    BorderWidthMm = 0.3f,
+    GridLineWidthMm = 0.2f,
+    Columns = new()
+    {
+        new TableColumn { Header = "类别", Field = "Cat",   Width = 18f, Align = TableColumnAlign.Center },
+        new TableColumn { Header = "项目", Field = "Item",  Width = 38f },
+        new TableColumn { Header = "数量", Field = "Qty",   Width = 20f, Align = TableColumnAlign.Right },
+        new TableColumn { Header = "单价", Field = "Price", Width = 20f, Align = TableColumnAlign.Right, Format = "N2" },
+    },
+    Rows = new()
+    {
+        // RowSpan 演示：类别「紧固件」纵向跨两行（下方行的 Cat 列无需再填）
+        new() {
+            ["Cat"]   = new TableCell { Text = "紧固件", RowSpan = 2, Align = TableColumnAlign.Center, Bold = true },
+            ["Item"]  = "螺丝 M3×8",
+            ["Qty"]   = 500,
+            ["Price"] = 0.05m
+        },
+        new() {
+            ["Item"]  = "螺母 M6",
+            ["Qty"]   = 300,
+            ["Price"] = 0.12m
+        },
+        // ColSpan 演示：合计行首格跨 3 列，金额单独居右
+        new() {
+            ["Cat"]   = new TableCell { Text = "合计", ColSpan = 3, Align = TableColumnAlign.Center, Bold = true },
+            ["Price"] = 61.00m
+        },
+    }
+});
+
+string spanPngPath = Path.Combine(outputDir, "table_span_preview.png");
+new TemplateRenderer { Dpi = 300f }.SaveToPng(spanTemplate, spanPngPath, new PrintData());
+Console.WriteLine($"  [OK] 合并单元格预览图已保存：{spanPngPath}");
+
+string spanPdfPath = Path.Combine(outputDir, "table_span.pdf");
+new PdfPrinter { Title = "合并单元格示例" }.SaveToFile(spanTemplate, spanPdfPath, new PrintData());
+Console.WriteLine($"  [OK] 合并单元格 PDF（SkiaSharp）已保存：{spanPdfPath}");
+
+string spanPdfSharpPath = Path.Combine(outputDir, "table_span_pdfsharp.pdf");
+new HybridPdfPrinter { Title = "合并单元格示例" }.SaveToFile(spanTemplate, spanPdfSharpPath, new PrintData());
+Console.WriteLine($"  [OK] 合并单元格 PDF（PdfSharp）已保存：{spanPdfSharpPath}");
 
 // ═══════════════════════════════════════════════════════════
 // 示例 6：物理打印测试（使用 PrintDocumentPrinter）
@@ -384,7 +451,7 @@ try
         //    .Set("Date",        DateTime.Today);
 
         // 不显示对话框，直接打印到默认打印机
-        printer.Print(a4Template, a4Data, new PrintOptions {PrinterName= "HP LaserJet MFP M232dw (AF51EA)",  ShowPrintDialog = false });
+        //printer.Print(a4Template, a4Data, new PrintOptions {PrinterName= "HP LaserJet MFP M232dw (AF51EA)",  ShowPrintDialog = false });
         Console.WriteLine("  [OK] 打印任务已发送到默认打印机。");
     }
 }
@@ -399,3 +466,141 @@ catch (Exception ex)
 Console.WriteLine();
 Console.WriteLine("所有示例已完成，请查看输出目录中的文件。");
 Console.WriteLine($"  → {outputDir}");
+
+
+
+
+var template = LabelTemplate.A4Landscape();
+template.Name = "完整复刻装箱/报验单";
+
+// --- 2. 顶部标题与 Logo 区域 ---
+// 预留 Logo 位置
+template.Add(new ImageElement
+{
+    X = 10f,
+    Y = 8f,
+    Width = 35f,
+    Height = 12f,
+    FilePath = @"logo.png", // 示例 Logo 占位路径，可替换为实际文件（缺失时该区域留空）
+    ScaleMode = ImageScaleMode.Uniform
+});
+
+template.Add(new TextElement
+{
+    X = 0f,
+    Y = 10f,
+    Width = 297f,
+    Height = 10f,
+    Text = "Packing/Checking List 装箱/报验单",
+    FontSize = 16f,
+    Bold = true,
+    Alignment = TextAlignment.Center
+});
+
+// --- 3. 页眉基础信息 (双列布局复刻) ---
+float headerY = 25f;
+float lineHeight = 5.5f;
+
+// 左侧：发货与供应商信息
+AddInfoRow(template, 10f, headerY, "ASN / 发货通知:", "ASN-DEMO-20260921-001");
+AddInfoRow(template, 10f, headerY + lineHeight, "IDN / 内向交货单:", "IDN-DEMO-000123");
+AddInfoRow(template, 10f, headerY + lineHeight * 2, "Supplier Code / 供应商代码:", "SUP-DEMO-001");
+AddInfoRow(template, 10f, headerY + lineHeight * 3, "Supplier Name / 供应商名称:", "示例汽车内饰材料有限公司");
+AddInfoRow(template, 10f, headerY + lineHeight * 4, "Shipping Date / 发货日期:", "2026-09-21");
+
+// 右侧：收货工厂、地址、联系人
+float rightColumnX = 155f;
+AddInfoRow(template, rightColumnX, headerY, "Plant / 收货工厂:", "示例泡沫工厂（演示）");
+AddInfoRow(template, rightColumnX, headerY + lineHeight, "Loading Dock / 收货道口:", "101");
+AddInfoRow(template, rightColumnX, headerY + lineHeight * 2, "Delivery ADD / 收货地址:", "示例市示例区示范大道 1 号");
+AddInfoRow(template, rightColumnX, headerY + lineHeight * 3, "Contact / 收货联系人:", "张三 / 李四 - 13800000000");
+AddInfoRow(template, rightColumnX, headerY + lineHeight * 4, "ETA / 预计到货时间:", "2026-09-21 14:00:00");
+
+template.Add(new BarcodeElement
+{
+    X = 230f,
+    Y = 10f,
+    Width = 55f,
+    Height = 12f,
+    Format = BarcodeFormat.Code128,
+    Value = "ASN-DEMO-20260921-001",
+    ShowText = true
+});
+
+// --- 4. 明细表格 (TableElement) ---
+var detailsTable = new TableElement
+{
+    X = 10f,
+    Y = 55f,
+    Width = 277f,
+    RowHeight = 9f,
+    HeaderFontSize = 8f,
+    RowFontSize = 8f,
+    HeaderBackColor = "#FFE8E8E8",
+    BorderWidthMm = 0.2f,
+    GridLineWidthMm = 0.2f,
+    Columns = new()
+                {
+                    new TableColumn { Header = "项\nLine", Field = "Line", Width = 10f, Align = TableColumnAlign.Center },
+                    new TableColumn { Header = "零件号 \n Part Number", Field = "PartNo", Width = 35f },
+                    new TableColumn { Header = "零件名称 \n Part Description", Field = "Desc", Width = 60f },
+                    new TableColumn { Header = "单位\nUM", Field = "UM", Width = 10f, Align = TableColumnAlign.Center },
+                    new TableColumn { Header = "订单数量 \n PO Qty", Field = "POQty", Width = 20f, Align = TableColumnAlign.Center },
+                    new TableColumn { Header = "发货数量\nShip Qty", Field = "ShipQty", Width = 20f, Align = TableColumnAlign.Right },
+                    new TableColumn { Header = "标包数量\nPkg Qty", Field = "PkgQty", Width = 20f, Align = TableColumnAlign.Right },
+                    new TableColumn { Header = "是否报检\nQualify", Field = "Qualify", Width = 20f },
+                    new TableColumn { Header = "检验结果\nResult", Field = "Result", Width = 20f },
+                    new TableColumn { Header = "实收数量\nActual Qty", Field = "ActualQty", Width = 22f },
+                    new TableColumn { Header = "采购单号\nPO No", Field = "PONo", Width = 40f }
+                }
+};
+
+detailsTable.Rows = new List<Dictionary<string, object?>>
+            {
+                new() { ["Line"] = 1, ["PartNo"] = "DEMO-PN-001", ["Desc"] = "示例头枕面套总成 A", ["UM"] = "EA", ["POQty"] = 446, ["ShipQty"] = 20, ["PkgQty"] = 20, ["PONo"] = "DEMO-PO-001" },
+                new() { ["Line"] = 2, ["PartNo"] = "DEMO-PN-002", ["Desc"] = "示例头枕面套总成 B", ["UM"] = "EA", ["POQty"] = 528, ["ShipQty"] = 125, ["PkgQty"] = 28, ["PONo"] = "DEMO-PO-002" },
+                new() { ["Line"] = 3, ["PartNo"] = "DEMO-PN-001", ["Desc"] = "示例头枕面套总成 A", ["UM"] = "EA", ["POQty"] = 520, ["ShipQty"] = 16, ["PkgQty"] = 16, ["PONo"] = "DEMO-PO-002" },
+                new() { ["Line"] = 4, ["PartNo"] = "DEMO-PN-003", ["Desc"] = "示例头枕面套总成 C", ["UM"] = "EA", ["POQty"] = 513, ["ShipQty"] = 168, ["PkgQty"] = 45, ["PONo"] = "DEMO-PO-002" }
+            };
+
+template.Add(detailsTable);
+
+// --- 5. 底部区域 (合计、备注与签字) ---
+float tableBottomY = 55f + (1 + detailsTable.Rows.Count) * 9f;
+
+// 备注框
+template.Add(new RectangleElement { X = 10f, Y = tableBottomY + 5f, Width = 180f, Height = 15f, BorderWidthMm = 0.2f });
+template.Add(new TextElement { X = 12f, Y = tableBottomY + 7f, Width = 175f, Text = "备注: {Remark}", FontSize = 9f });
+
+// 送货总箱数
+template.Add(new TextElement
+{
+    X = 200f,
+    Y = tableBottomY + 5f,
+    Width = 87f,
+    Text = "送货总箱数 / TOTAL PALLETS: 12",
+    FontSize = 11f,
+    Bold = true,
+    Alignment = TextAlignment.Right
+});
+
+// 签字横线
+float signY = 185f;
+template.Add(new LineElement { X = 10f, Y = signY, Width = 277f, Height = 0f, LineWidthMm = 0.5f });
+template.Add(new TextElement { X = 10f, Y = signY + 2f, Width = 100f, Text = "供应商签字 / Supplier Signed By: ________________", FontSize = 9f });
+template.Add(new TextElement { X = 197f, Y = signY + 2f, Width = 100f, Text = "收货人签字 / Receiver Signed By: ________________", FontSize = 9f, Alignment = TextAlignment.Right });
+
+// --- 6. 绑定数据并生成预览 ---
+var data = new PrintData().Set("Remark", "此批次为示例演示数据，仅供功能展示，请勿用于实际业务。");
+
+new TemplateRenderer { Dpi = 300f }.SaveToPng(template, "PackingList_Full.png", data);
+
+new HybridPdfPrinter().SaveToFile(template, "PackingList_Full.pdf", data);
+
+// 辅助方法：快速添加页眉行
+static void AddInfoRow(LabelTemplate template, float x, float y, string label, string value)
+{
+    // 值起点 x+48 要在标签框（47mm）之外，否则"Supplier Name / 供应商名称:"这类长标签会与值重叠
+    template.Add(new TextElement { X = x, Y = y, Width = 47f, Text = label, FontSize = 8.5f, Bold = true });
+    template.Add(new TextElement { X = x + 48f, Y = y, Width = 90f, Text = value, FontSize = 8.5f });
+}

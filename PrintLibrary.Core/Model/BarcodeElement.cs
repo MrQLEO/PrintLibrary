@@ -1,4 +1,5 @@
 using SkiaSharp;
+using System;
 using ZXing;
 using ZXing.Common;
 using ZXing.QrCode.Internal;
@@ -98,7 +99,7 @@ namespace PrintLibrary.Model
             if (bitMatrix is null) return;
 
             // 3. 在 mm 坐标系下向量绘制条码（清晰 + PDF 体积小）
-            DrawVectorBarcode(canvas, bitMatrix);
+            DrawVectorBarcode(canvas, bitMatrix, content);
         }
 
         // ── 私有辅助 ──────────────────────────────────────────────────────
@@ -121,6 +122,10 @@ namespace PrintLibrary.Model
                 };
             }
 
+            // 一维码左右静音区（模块数）：过小会导致扫码枪/手机难以识别
+            if (IsLinear1DBarcode(Format))
+                hints[EncodeHintType.MARGIN] = 10;
+
             var zxingFormat = MapFormat(Format);
             var writer = new MultiFormatWriter();
 
@@ -132,7 +137,7 @@ namespace PrintLibrary.Model
         /// 向量绘制条码：直接将 BitMatrix 的每个模块作为矩形路径绘入画布。
         /// 无位图生成，PDF 输出为纯向量图形，体积小、无限缩放不失真。
         /// </summary>
-        private void DrawVectorBarcode(SKCanvas canvas, BitMatrix matrix)
+        private void DrawVectorBarcode(SKCanvas canvas, BitMatrix matrix, string resolvedContent)
         {
             int mw = matrix.Width;
             int mh = matrix.Height;
@@ -140,11 +145,19 @@ namespace PrintLibrary.Model
             // 目标区域（mm 坐标）
             float destX = X, destY = Y, destW = Width, destH = Height;
 
-            // 每个模块的 mm 尺寸
-            float moduleW = destW / mw;
-            float moduleH = destH / mh;
+            // 一维码底部可读文字（与 PdfSharpPrinter 行为对齐）
+            float textBandMm = 0f;
+            if (ShowText && IsLinear1DBarcode(Format))
+                textBandMm = Math.Clamp(Height * 0.14f, 1.6f, 6f);
 
-            // 绘制背景
+            float barTop = destY;
+            float barH = Math.Max(0.5f, destH - textBandMm);
+
+            // 每个模块的 mm 尺寸（用相邻列/行边界相减，避免浮点缝隙）
+            float moduleW = destW / mw;
+            float moduleH = barH / mh;
+
+            // 绘制背景（整块区域含文字带）
             using var bgPaint = new SKPaint { Color = ParseColor(BackColor), IsAntialias = false, Style = SKPaintStyle.Fill };
             canvas.DrawRect(new SKRect(destX, destY, destX + destW, destY + destH), bgPaint);
 
@@ -152,17 +165,40 @@ namespace PrintLibrary.Model
             using var fgPaint = new SKPaint { Color = ParseColor(ForeColor), IsAntialias = false, Style = SKPaintStyle.Fill };
             for (int row = 0; row < mh; row++)
             {
+                float ry = barTop + row * moduleH;
+                float ryNext = barTop + (row + 1) * moduleH;
+                float rh = ryNext - ry;
                 for (int col = 0; col < mw; col++)
                 {
-                    if (matrix[col, row])
-                    {
-                        float rx = destX + col * moduleW;
-                        float ry = destY + row * moduleH;
-                        canvas.DrawRect(rx, ry, moduleW, moduleH, fgPaint);
-                    }
+                    if (!matrix[col, row]) continue;
+
+                    float rx = destX + col * moduleW;
+                    float rxNext = destX + (col + 1) * moduleW;
+                    canvas.DrawRect(rx, ry, rxNext - rx, rh, fgPaint);
                 }
             }
+
+            if (textBandMm <= 0.01f || string.IsNullOrEmpty(resolvedContent)) return;
+
+            using var tf = SKTypeface.FromFamilyName("Microsoft YaHei", SKFontStyle.Normal) ?? SKTypeface.Default;
+            float textSizeMm = Math.Clamp(textBandMm * 0.55f, 0.75f, 4f);
+            using var tfont = new SKFont(tf, textSizeMm);
+            using var tpaint = new SKPaint { Color = ParseColor(ForeColor), IsAntialias = true, Style = SKPaintStyle.Fill };
+            var tm = tfont.Metrics;
+            float bandTop = barTop + barH;
+            float bandBot = destY + destH;
+            float bandMidY = (bandTop + bandBot) * 0.5f;
+            float textBaseY = bandMidY - (tm.Ascent + tm.Descent) / 2f;
+            canvas.DrawText(resolvedContent, destX + destW * 0.5f, textBaseY, SKTextAlign.Center, tfont, tpaint);
         }
+
+        /// <summary>是否为一维线性条码（需左右静音区、可配底部可读文字）。</summary>
+        private static bool IsLinear1DBarcode(BarcodeFormat format) => format switch
+        {
+            BarcodeFormat.Code128 or BarcodeFormat.Code39 or BarcodeFormat.Ean13 or BarcodeFormat.Ean8
+                or BarcodeFormat.UpcA or BarcodeFormat.Itf => true,
+            _ => false
+        };
 
         /// <summary>将本库的 <see cref="BarcodeFormat"/> 映射到 ZXing 的格式枚举。</summary>
         private static ZXing.BarcodeFormat MapFormat(BarcodeFormat format) => format switch

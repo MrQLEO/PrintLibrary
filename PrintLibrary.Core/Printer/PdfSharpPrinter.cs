@@ -178,6 +178,8 @@ namespace PrintLibrary.Printer
             string resolvedText = data.Resolve(te.Text);
             if (string.IsNullOrEmpty(resolvedText)) return;
 
+            resolvedText = resolvedText.Replace("\r\n", "\n").Replace('\r', '\n');
+
             // 字号换算：画布已设置 mm→pt 缩放变换，XFont 字号单位为 pt，
             // 在缩放后的画布上直接用 pt 值会导致双重放大。
             // 正确做法：pt → mm，让画布缩放还原为真实 pt 值。
@@ -212,6 +214,25 @@ namespace PrintLibrary.Printer
             {
                 DrawWrappedText(gfx, font, brush, resolvedText, rect, format, te, fontSizeMm);
             }
+            else if (resolvedText.Contains('\n'))
+            {
+                var lines = resolvedText.Split('\n');
+                double lineHtMm = font.GetHeight();
+                double lineSpacingMm = lineHtMm * 1.15;
+                double span = lines.Length == 1 ? lineHtMm : (lines.Length - 1) * lineSpacingMm + lineHtMm;
+                double y0 = rect.Height > 0.01 ? rect.Y + (rect.Height - span) / 2 : rect.Y;
+                double padMm = fontSizeMm * 0.2;
+                var lineFmt = new XStringFormat
+                {
+                    Alignment = format.Alignment,
+                    LineAlignment = XLineAlignment.Near
+                };
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    var drawRect = new XRect(rect.X - padMm, y0 + i * lineSpacingMm, rect.Width + padMm * 2, lineHtMm * 2);
+                    DrawStringWithFallback(gfx, lines[i], font, brush, drawRect, lineFmt, fontSizeMm);
+                }
+            }
             else
             {
                 // 单行绘制：为避免符号/标点等字符被矩形边界裁剪导致显示不全，
@@ -230,27 +251,59 @@ namespace PrintLibrary.Printer
         private void DrawWrappedText(XGraphics gfx, XFont font, XBrush brush,
             string text, XRect rect, XStringFormat format, TextElement te, double fontSizeMm)
         {
+            text = text.Replace("\r\n", "\n").Replace('\r', '\n');
             // 字号已在 RenderText 中转为 mm 值传入 XFont
             // font.GetHeight() 返回的是 XFont 字号单位的行高（当前为 mm 坐标系下的值）
             double lineHtMm = font.GetHeight();
             double lineSpacingMm = lineHtMm * 1.2;
 
             double y = rect.Y;
-            string currentLine = "";
+            var paragraphs = text.Split('\n');
 
-            // 按空格/字符逐词拆分
-            var words = text.Split(' ');
-
-            foreach (var word in words)
+            for (int p = 0; p < paragraphs.Length; p++)
             {
-                string testLine = string.IsNullOrEmpty(currentLine) ? word : currentLine + " " + word;
-                var size = gfx.MeasureString(testLine, font);
-                // MeasureString 在 mm 坐标系下返回的宽度已经是 mm 单位
-                double widthMm = size.Width;
+                if (rect.Height > 0.01 && y + lineHtMm > rect.Y + rect.Height) break;
 
-                if (widthMm > te.Width && !string.IsNullOrEmpty(currentLine))
+                if (p > 0)
+                    y += lineSpacingMm;
+
+                var para = paragraphs[p];
+                if (para.Length == 0)
                 {
-                    // 当前行已满，先绘制
+                    y += lineSpacingMm * 0.35;
+                    continue;
+                }
+
+                string currentLine = "";
+                var words = para.Split(' ');
+
+                foreach (var word in words)
+                {
+                    string testLine = string.IsNullOrEmpty(currentLine) ? word : currentLine + " " + word;
+                    var size = gfx.MeasureString(testLine, font);
+                    double widthMm = size.Width;
+
+                    if (widthMm > te.Width && !string.IsNullOrEmpty(currentLine))
+                    {
+                        var drawRect = new XRect(rect.X, y, te.Width, lineHtMm);
+                        var lineFormat = new XStringFormat
+                        {
+                            Alignment = format.Alignment,
+                            LineAlignment = XLineAlignment.Near
+                        };
+                        DrawStringWithFallback(gfx, currentLine, font, brush, drawRect, lineFormat, fontSizeMm);
+                        y += lineSpacingMm;
+                        currentLine = word;
+                        if (rect.Height > 0.01 && y + lineHtMm > rect.Y + rect.Height) break;
+                    }
+                    else
+                    {
+                        currentLine = testLine;
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(currentLine) && (rect.Height <= 0.01 || y + lineHtMm <= rect.Y + rect.Height))
+                {
                     var drawRect = new XRect(rect.X, y, te.Width, lineHtMm);
                     var lineFormat = new XStringFormat
                     {
@@ -258,26 +311,7 @@ namespace PrintLibrary.Printer
                         LineAlignment = XLineAlignment.Near
                     };
                     DrawStringWithFallback(gfx, currentLine, font, brush, drawRect, lineFormat, fontSizeMm);
-                    y += lineSpacingMm;
-                    currentLine = word;
-                    if (y + lineHtMm > rect.Y + rect.Height) break;
                 }
-                else
-                {
-                    currentLine = testLine;
-                }
-            }
-
-            // 绘制最后一行
-            if (!string.IsNullOrEmpty(currentLine) && y + lineHtMm <= rect.Y + rect.Height)
-            {
-                var drawRect = new XRect(rect.X, y, te.Width, lineHtMm);
-                var lineFormat = new XStringFormat
-                {
-                    Alignment = format.Alignment,
-                    LineAlignment = XLineAlignment.Near
-                };
-                DrawStringWithFallback(gfx, currentLine, font, brush, drawRect, lineFormat, fontSizeMm);
             }
         }
 
@@ -333,25 +367,35 @@ namespace PrintLibrary.Printer
 
             int mw = bitMatrix.Width;
             int mh = bitMatrix.Height;
+
+            double textBandMm = 0;
+            if (be.ShowText && IsLinear1DBarcode(be.Format))
+                textBandMm = Math.Clamp(be.Height * 0.14, 1.6, 6.0);
+
+            double barTop = be.Y;
+            double barH = Math.Max(0.5, be.Height - textBandMm);
+
             double moduleW = be.Width / mw;
-            double moduleH = be.Height / mh;
+            double moduleH = barH / mh;
 
             // 背景
             var bgBrush = new XSolidBrush(ParseColor(be.BackColor));
             gfx.DrawRectangle(bgBrush, be.X, be.Y, be.Width, be.Height);
 
-            // 前景模块
+            // 前景模块（相邻列/行边界相减，避免浮点缝隙导致扫码失败）
             var fgBrush = new XSolidBrush(ParseColor(be.ForeColor));
             for (int row = 0; row < mh; row++)
             {
+                double ry = barTop + row * moduleH;
+                double ryNext = barTop + (row + 1) * moduleH;
+                double rh = ryNext - ry;
                 for (int col = 0; col < mw; col++)
                 {
-                    if (bitMatrix[col, row])
-                    {
-                        double rx = be.X + col * moduleW;
-                        double ry = be.Y + row * moduleH;
-                        gfx.DrawRectangle(fgBrush, rx, ry, moduleW, moduleH);
-                    }
+                    if (!bitMatrix[col, row]) continue;
+
+                    double rx = be.X + col * moduleW;
+                    double rxNext = be.X + (col + 1) * moduleW;
+                    gfx.DrawRectangle(fgBrush, rx, ry, rxNext - rx, rh);
                 }
             }
 
@@ -360,12 +404,13 @@ namespace PrintLibrary.Printer
                 be.Format != ModelBarcode.DataMatrix &&
                 be.Format != ModelBarcode.Aztec)
             {
-                double textHeightMm = be.Height * 0.12; // 文本占条码高度的 12%
+                double textHeightMm = textBandMm > 0.01 ? Math.Clamp(textBandMm * 0.55, 0.75, 4.0) : be.Height * 0.12;
                 // 画布在 mm 坐标系下，XFont 字号需传 mm 值（画布缩放会还原为 pt）
                 double fontSizeMm = textHeightMm;
                 var font = CreateXFont("SimHei", fontSizeMm, false, false);
                 var textBrush = new XSolidBrush(ParseColor(be.ForeColor));
-                var textRect = new XRect(be.X, be.Y + be.Height - textHeightMm * 1.5, be.Width, textHeightMm * 2);
+                double textTop = barTop + barH;
+                var textRect = new XRect(be.X, textTop, be.Width, be.Y + be.Height - textTop);
                 var fmt = new XStringFormat { Alignment = XStringAlignment.Center, LineAlignment = XLineAlignment.Center };
                 DrawStringWithFallback(gfx, content, font, textBrush, textRect, fmt, fontSizeMm);
             }
@@ -384,6 +429,10 @@ namespace PrintLibrary.Printer
                     _ => ErrorCorrectionLevel.M
                 };
             }
+
+            // 一维码左右静音区（模块数），过小会导致无法识别
+            if (IsLinear1DBarcode(format))
+                hints[EncodeHintType.MARGIN] = 10;
 
             var zxingFormat = MapFormat(format);
             var writer = new MultiFormatWriter();
@@ -407,6 +456,13 @@ namespace PrintLibrary.Printer
             _                       => ZXing.BarcodeFormat.CODE_128
         };
 
+        private static bool IsLinear1DBarcode(ModelBarcode format) => format switch
+        {
+            ModelBarcode.Code128 or ModelBarcode.Code39 or ModelBarcode.Ean13 or ModelBarcode.Ean8
+                or ModelBarcode.UpcA or ModelBarcode.Itf => true,
+            _ => false
+        };
+
         // ── TableElement ───────────────────────────────────────────────────
 
         private void RenderTable(XGraphics gfx, TableElement tbl)
@@ -414,20 +470,28 @@ namespace PrintLibrary.Printer
             if (tbl.Columns.Count == 0) return;
 
             float[] colWidths = CalcColumnWidths(tbl);
-            int totalRows = 1 + tbl.Rows.Count;
+            int dataRows = tbl.Rows.Count;
+            int totalRows = 1 + dataRows;
             float tableX = tbl.X, tableY = tbl.Y;
 
-            // 1. 绘制奇偶行背景
-            DrawTableRowBackgrounds(gfx, tbl, tableX, tableY, totalRows);
+            // 构建合并单元格占用图（表头 ColSpan + 数据行 ColSpan/RowSpan）
+            tbl.BuildSpanMaps(colWidths, out bool[,] covered, out int[,] colSpan,
+                              out int[,] rowSpan, out int[,] anchorR, out int[,] anchorC);
 
-            // 2. 绘制网格线
-            DrawTableGridLines(gfx, tbl, tableX, tableY, colWidths, totalRows);
+            // 1. 绘制奇偶行背景（合并区域默认不填充，可由 TableCell.BackColor 覆盖）
+            DrawTableRowBackgrounds(gfx, tbl, tableX, tableY, colWidths,
+                                    covered, colSpan, rowSpan, anchorR, anchorC);
 
-            // 3. 绘制表头文字
+            // 2. 绘制网格线（避让合并单元格）
+            DrawTableGridLines(gfx, tbl, tableX, tableY, colWidths, dataRows,
+                               covered, colSpan, rowSpan, anchorR, anchorC);
+
+            // 3. 绘制表头文字（支持表头 ColSpan）
             DrawTableHeader(gfx, tbl, tableX, tableY, colWidths);
 
-            // 4. 绘制数据行文字
-            DrawTableRows(gfx, tbl, tableX, tableY, colWidths);
+            // 4. 绘制数据行文字（支持 ColSpan/RowSpan）
+            DrawTableRows(gfx, tbl, tableX, tableY, colWidths,
+                          covered, colSpan, rowSpan, anchorR, anchorC);
         }
 
         private static float[] CalcColumnWidths(TableElement tbl)
@@ -462,9 +526,10 @@ namespace PrintLibrary.Printer
         }
 
         private static void DrawTableRowBackgrounds(XGraphics gfx, TableElement tbl,
-            float tableX, float tableY, int totalRows)
+            float tableX, float tableY, float[] colWidths,
+            bool[,] covered, int[,] colSpan, int[,] rowSpan, int[,] anchorR, int[,] anchorC)
         {
-            // 表头背景
+            // 表头背景（整行填充）
             var headerBg = ParseColor(tbl.HeaderBackColor);
             if (headerBg.A > 0)
             {
@@ -472,24 +537,66 @@ namespace PrintLibrary.Printer
                 gfx.DrawRectangle(brush, tableX, tableY, tbl.Width, tbl.RowHeight);
             }
 
-            // 数据行背景
-            for (int i = 0; i < tbl.Rows.Count; i++)
+            // 数据行背景：合并区域默认不填充奇偶色，需要时由 TableCell.BackColor 指定
+            for (int r = 0; r < tbl.Rows.Count; r++)
             {
-                var bgColor = (i % 2 == 0) ? ParseColor(tbl.OddRowBackColor) : ParseColor(tbl.EvenRowBackColor);
-                if (bgColor.A > 0)
+                var bgColor = (r % 2 == 0) ? ParseColor(tbl.OddRowBackColor) : ParseColor(tbl.EvenRowBackColor);
+                float rowY = tableY + (r + 1) * tbl.RowHeight;
+
+                float? runStart = null;
+                float runWidth = 0f;
+
+                for (int c = 0; c < tbl.Columns.Count; c++)
                 {
-                    float rowY = tableY + (i + 1) * tbl.RowHeight;
-                    var brush = new XSolidBrush(bgColor);
-                    gfx.DrawRectangle(brush, tableX, rowY, tbl.Width, tbl.RowHeight);
+                    bool isCovered = covered[r + 1, c];
+                    bool isMerged = colSpan[r + 1, c] > 1 || rowSpan[r + 1, c] > 1;
+
+                    if (!isCovered && !isMerged)
+                    {
+                        runStart ??= tableX + SumWidths(colWidths, 0, c);
+                        runWidth += colWidths[c];
+                        continue;
+                    }
+
+                    if (runStart.HasValue && runWidth > 0 && bgColor.A > 0)
+                        gfx.DrawRectangle(new XSolidBrush(bgColor), runStart.Value, rowY, runWidth, tbl.RowHeight);
+                    runStart = null;
+                    runWidth = 0f;
+
+                    if (isMerged)
+                    {
+                        var cell = tbl.ResolveCell(tbl.Rows[r], tbl.Columns[c]);
+                        if (!string.IsNullOrEmpty(cell.BackColor))
+                        {
+                            float mx = tableX + SumWidths(colWidths, 0, c);
+                            float mw = SumWidths(colWidths, c, colSpan[r + 1, c]);
+                            float mh = tbl.RowHeight * rowSpan[r + 1, c];
+                            gfx.DrawRectangle(new XSolidBrush(ParseColor(cell.BackColor)), mx, rowY, mw, mh);
+                        }
+                    }
                 }
+
+                if (runStart.HasValue && runWidth > 0 && bgColor.A > 0)
+                    gfx.DrawRectangle(new XSolidBrush(bgColor), runStart.Value, rowY, runWidth, tbl.RowHeight);
             }
         }
 
-        private static void DrawTableGridLines(XGraphics gfx, TableElement tbl,
-            float tableX, float tableY, float[] colWidths, int totalRows)
+        /// <summary>从 start 起 count 列的宽度之和。</summary>
+        private static float SumWidths(float[] colWidths, int start, int count)
         {
-            float tableH = tbl.RowHeight * totalRows;
+            float sum = 0f;
+            for (int i = 0; i < count; i++) sum += colWidths[start + i];
+            return sum;
+        }
+
+        private static void DrawTableGridLines(XGraphics gfx, TableElement tbl,
+            float tableX, float tableY, float[] colWidths, int dataRows,
+            bool[,] covered, int[,] colSpan, int[,] rowSpan, int[,] anchorR, int[,] anchorC)
+        {
+            float tableH = tbl.RowHeight * (1 + dataRows);
             var gridClr = ParseColor(tbl.GridColor);
+            int nCols = tbl.Columns.Count;
+            int nRows = 1 + dataRows;   // 行 0 = 表头
 
             // 外边框
             if (tbl.BorderWidthMm > 0)
@@ -498,23 +605,47 @@ namespace PrintLibrary.Printer
                 gfx.DrawRectangle(borderPen, tableX, tableY, tbl.Width, tableH);
             }
 
-            // 内部网格线
             if (tbl.GridLineWidthMm <= 0) return;
             var gridPen = new XPen(gridClr, tbl.GridLineWidthMm);
 
-            // 水平线
-            for (int row = 1; row < totalRows; row++)
+            // 每列左边界 x 坐标
+            float[] colLeftX = new float[nCols];
+            float acc = tableX;
+            for (int c = 0; c < nCols; c++) { colLeftX[c] = acc; acc += colWidths[c]; }
+
+            // 水平内部分割线：逐行边界、逐列分段，避让纵向合并单元格
+            // 最后一列的分段右边界是表格右缘
+            for (int rb = 1; rb < nRows; rb++)
             {
-                float lineY = tableY + row * tbl.RowHeight;
-                gfx.DrawLine(gridPen, tableX, lineY, tableX + tbl.Width, lineY);
+                float lineY = tableY + rb * tbl.RowHeight;
+                for (int c = 0; c < nCols; c++)
+                {
+                    int ar = anchorR[rb - 1, c], ac = anchorC[rb - 1, c];
+                    int rs = rowSpan[ar, ac];
+                    bool crosses = (ar <= rb - 1 && ar + rs - 1 >= rb);
+                    if (crosses) continue;
+                    float x1 = colLeftX[c];
+                    float x2 = (c == nCols - 1) ? tableX + tbl.Width : colLeftX[c + 1];
+                    gfx.DrawLine(gridPen, x1, lineY, x2, lineY);
+                }
             }
 
-            // 垂直线
-            float colX = tableX;
-            for (int col = 0; col < colWidths.Length - 1; col++)
+            // 垂直内部分割线：逐列边界、逐行分段
+            // 只需判断左侧单元格是否横向跨过此边界（RowSpan 不影响垂直线）
+            // 最后一行的分段下边界是表格底缘
+            for (int cb = 0; cb < nCols - 1; cb++)
             {
-                colX += colWidths[col];
-                gfx.DrawLine(gridPen, colX, tableY, colX, tableY + tableH);
+                float lineX = colLeftX[cb] + colWidths[cb];
+                for (int r = 0; r < nRows; r++)
+                {
+                    int ar = anchorR[r, cb], ac = anchorC[r, cb];
+                    int cs = colSpan[ar, ac];
+                    bool crossesH = (ac <= cb && ac + cs - 1 >= cb + 1);
+                    if (crossesH) continue;
+                    float topY = tableY + r * tbl.RowHeight;
+                    float botY = (r == nRows - 1) ? tableY + tableH : tableY + (r + 1) * tbl.RowHeight;
+                    gfx.DrawLine(gridPen, lineX, topY, lineX, botY);
+                }
             }
         }
 
@@ -524,34 +655,60 @@ namespace PrintLibrary.Printer
             var font = CreateXFont(tbl.FontFamily, tbl.HeaderFontSize / MmToPt, tbl.HeaderBold, false);
             var brush = new XSolidBrush(ParseColor(tbl.HeaderForeColor));
 
+            // 表头 ColSpan：仅锚点列绘制文字，被合并列跳过
+            bool[] headerCovered = new bool[tbl.Columns.Count];
             float colX = tableX;
             for (int i = 0; i < tbl.Columns.Count; i++)
             {
-                var cellRect = new XRect(colX, tableY, colWidths[i], tbl.RowHeight);
+                if (headerCovered[i]) continue;
+                int cs = Math.Clamp(tbl.Columns[i].HeaderColSpan, 1, tbl.Columns.Count - i);
+                for (int dc = 1; dc < cs; dc++) headerCovered[i + dc] = true;
+
+                float w = 0f;
+                for (int dc = 0; dc < cs; dc++) w += colWidths[i + dc];
+                var cellRect = new XRect(colX, tableY, w, tbl.RowHeight);
                 DrawCellText(gfx, font, brush, tbl.Columns[i].Header, cellRect, tbl.Columns[i].Align);
-                colX += colWidths[i];
+                colX += w;
             }
         }
 
         private void DrawTableRows(XGraphics gfx, TableElement tbl,
-            float tableX, float tableY, float[] colWidths)
+            float tableX, float tableY, float[] colWidths,
+            bool[,] covered, int[,] colSpan, int[,] rowSpan, int[,] anchorR, int[,] anchorC)
         {
-            var font = CreateXFont(tbl.FontFamily, tbl.RowFontSize / MmToPt, false, false);
-            var brush = new XSolidBrush(ParseColor(tbl.RowForeColor));
+            int nCols = tbl.Columns.Count;
 
-            for (int rowIdx = 0; rowIdx < tbl.Rows.Count; rowIdx++)
+            for (int r = 0; r < tbl.Rows.Count; r++)
             {
-                var row = tbl.Rows[rowIdx];
-                float rowY = tableY + (rowIdx + 1) * tbl.RowHeight;
+                float rowY = tableY + (r + 1) * tbl.RowHeight;
                 float colX = tableX;
 
-                for (int colIdx = 0; colIdx < tbl.Columns.Count; colIdx++)
+                for (int c = 0; c < nCols; c++)
                 {
-                    var col = tbl.Columns[colIdx];
-                    string cellText = GetCellValue(row, col);
-                    var cellRect = new XRect(colX, rowY, colWidths[colIdx], tbl.RowHeight);
-                    DrawCellText(gfx, font, brush, cellText, cellRect, col.Align);
-                    colX += colWidths[colIdx];
+                    float cellW = colWidths[c];
+                    // 行 0 是表头，数据行 r 对应合并图中的第 r+1 行
+                    if (covered[r + 1, c])
+                    {
+                        colX += cellW;
+                        continue;   // 被合并覆盖的格子，不绘制
+                    }
+
+                    var cell = tbl.ResolveCell(tbl.Rows[r], tbl.Columns[c]);
+                    int cs = colSpan[r + 1, c];
+                    int rs = rowSpan[r + 1, c];
+
+                    float w = 0f;
+                    for (int dc = 0; dc < cs; dc++) w += colWidths[c + dc];
+                    float h = tbl.RowHeight * rs;
+                    var rect = new XRect(colX, rowY, w, h);
+
+                    var color = ParseColor(cell.ForeColor ?? tbl.RowForeColor);
+                    bool bold = cell.Bold ?? false;
+                    var font = CreateXFont(tbl.FontFamily, tbl.RowFontSize / MmToPt, bold, false);
+                    var brush = new XSolidBrush(color);
+                    DrawCellText(gfx, font, brush, cell.Text, rect, cell.Align);
+
+                    colX += cellW;
                 }
             }
         }
@@ -561,9 +718,12 @@ namespace PrintLibrary.Printer
         {
             if (string.IsNullOrEmpty(text)) return;
 
+            text = text.Replace("\r\n", "\n").Replace('\r', '\n');
+            var lines = text.Split('\n');
+
             var fmt = new XStringFormat
             {
-                LineAlignment = XLineAlignment.Center
+                LineAlignment = XLineAlignment.Near
             };
 
             // 添加内边距
@@ -584,20 +744,17 @@ namespace PrintLibrary.Printer
                     break;
             }
 
-            // fontSizeMm 从 XFont 的 Size 属性获取（已经过 pt→mm 换算）
             double fontSizeMm = font.Size;
-            DrawStringWithFallback(gfx, text, font, brush, drawRect, fmt, fontSizeMm);
-        }
+            double lineH = font.GetHeight();
+            double lineSpacing = lineH * 1.12;
+            double span = lines.Length == 1 ? lineH : (lines.Length - 1) * lineSpacing + lineH;
+            double y0 = cellRect.Y + (cellRect.Height - span) / 2;
 
-        private static string GetCellValue(Dictionary<string, object?> row, TableColumn col)
-        {
-            if (!row.TryGetValue(col.Field, out var value) || value is null)
-                return string.Empty;
-
-            if (!string.IsNullOrEmpty(col.Format) && value is IFormattable formattable)
-                return formattable.ToString(col.Format, null);
-
-            return value.ToString() ?? string.Empty;
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var lineRect = new XRect(drawRect.X, y0 + i * lineSpacing, drawRect.Width, lineH * 2.5);
+                DrawStringWithFallback(gfx, lines[i], font, brush, lineRect, fmt, fontSizeMm);
+            }
         }
 
         // ── ImageElement ───────────────────────────────────────────────────

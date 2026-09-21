@@ -18,6 +18,38 @@ namespace PrintLibrary.Model
     }
 
     /// <summary>
+    /// 表格单元格。可直接替代普通值放入 <see cref="TableElement.Rows"/> 字典，
+    /// 用于指定合并（ColSpan / RowSpan）、对齐覆盖、前景色、加粗等。
+    /// <para>普通值（string / int / decimal 等）等价于 ColSpan=1、RowSpan=1 的单元格，完全向后兼容。</para>
+    /// </summary>
+    public class TableCell
+    {
+        /// <summary>单元格文字（已格式化或原始文本均可）。</summary>
+        public string? Text { get; set; }
+
+        /// <summary>横向合并列数（colspan），默认 1 表示不跨列。</summary>
+        public int ColSpan { get; set; } = 1;
+
+        /// <summary>纵向合并行数（rowspan），默认 1 表示不跨行。</summary>
+        public int RowSpan { get; set; } = 1;
+
+        /// <summary>对齐方式覆盖；为空时继承所在列的 <see cref="TableColumn.Align"/>。</summary>
+        public TableColumnAlign? Align { get; set; }
+
+        /// <summary>前景色（ARGB 十六进制）覆盖；为空时继承 <see cref="TableElement.RowForeColor"/>。</summary>
+        public string? ForeColor { get; set; }
+
+        /// <summary>
+        /// 合并区域背景色（ARGB 十六进制）。仅 ColSpan/RowSpan &gt; 1 时生效。
+        /// 默认 null 表示不填充（奇偶行色带不会进入合并区域，避免跨行文字压在色带分界上）。
+        /// </summary>
+        public string? BackColor { get; set; }
+
+        /// <summary>是否加粗覆盖；为空时按数据行默认（不加粗）。</summary>
+        public bool? Bold { get; set; }
+    }
+
+    /// <summary>
     /// 表格列定义。
     /// 描述一列的标题、宽度、对齐方式以及绑定到数据对象的哪个属性/字段。
     /// </summary>
@@ -38,6 +70,13 @@ namespace PrintLibrary.Model
         /// 列对齐方式，默认左对齐。
         /// </summary>
         public TableColumnAlign Align { get; set; } = TableColumnAlign.Left;
+
+        /// <summary>
+        /// 表头跨列数（colspan）。默认 1 表示不跨列。
+        /// 设为 N（&gt;1）时，该列表头向右合并 N 列，与 HTML table 的 colspan 语义一致；
+        /// 被合并列的表头文字不再单独绘制（由本列统一覆盖）。
+        /// </summary>
+        public int HeaderColSpan { get; set; } = 1;
 
         /// <summary>
         /// 数据绑定字段名。
@@ -181,8 +220,9 @@ namespace PrintLibrary.Model
             // 1. 计算列宽（未指定的列自动均分剩余宽度）
             float[] colWidths = CalcColumnWidths();
 
-            // 2. 计算行数（表头 + 数据行）
-            int totalRows = 1 + Rows.Count;
+            // 2. 行数（表头 + 数据行）
+            int dataRows = Rows.Count;
+            int totalRows = 1 + dataRows;
 
             // 3. 画布已设置 mm→px 矩阵，直接用毫米坐标绘制
             float tableX = X;
@@ -190,17 +230,24 @@ namespace PrintLibrary.Model
             float tableW = Width;
             float tableH = RowHeight * totalRows;
 
-            // 4. 绘制背景（奇偶行交替色）
-            DrawRowBackgrounds(canvas, tableX, tableY, totalRows);
+            // 4. 构建合并单元格占用图（含表头 ColSpan 与数据行 ColSpan/RowSpan）
+            BuildSpanMaps(colWidths, out bool[,] covered, out int[,] colSpan,
+                          out int[,] rowSpan, out int[,] anchorR, out int[,] anchorC);
 
-            // 5. 绘制网格线
-            DrawGridLines(canvas, tableX, tableY, tableW, tableH, colWidths);
+            // 5. 绘制背景（奇偶行交替色；合并区域默认不填充，可由 TableCell.BackColor 覆盖）
+            DrawRowBackgrounds(canvas, tableX, tableY, colWidths,
+                               covered, colSpan, rowSpan, anchorR, anchorC);
 
-            // 6. 绘制表头文字
+            // 6. 绘制网格线（避让合并单元格）
+            DrawGridLines(canvas, tableX, tableY, tableW, tableH, colWidths,
+                          dataRows, covered, colSpan, rowSpan, anchorR, anchorC);
+
+            // 7. 绘制表头文字（支持表头 ColSpan）
             DrawHeaderTexts(canvas, tableX, tableY, colWidths);
 
-            // 7. 绘制数据行文字
-            DrawRowTexts(canvas, tableX, tableY, colWidths);
+            // 8. 绘制数据行文字（支持 ColSpan/RowSpan）
+            DrawRowTexts(canvas, tableX, tableY, colWidths,
+                         covered, colSpan, rowSpan, anchorR, anchorC);
         }
 
         // ── 私有计算方法 ──────────────────────────────────────────────
@@ -244,9 +291,10 @@ namespace PrintLibrary.Model
         /// <summary>
         /// 绘制奇偶行交替背景色。
         /// </summary>
-        private void DrawRowBackgrounds(SKCanvas canvas, float tableX, float tableY, int totalRows)
+        private void DrawRowBackgrounds(SKCanvas canvas, float tableX, float tableY, float[] colWidths,
+            bool[,] covered, int[,] colSpan, int[,] rowSpan, int[,] anchorR, int[,] anchorC)
         {
-            // 表头背景
+            // 表头背景（整行填充；表头合并区同色，无需区分）
             var headerBg = ParseColor(HeaderBackColor);
             if (headerBg.Alpha > 0)
             {
@@ -254,26 +302,83 @@ namespace PrintLibrary.Model
                 canvas.DrawRect(tableX, tableY, Width, RowHeight, paint);
             }
 
-            // 数据行背景
-            for (int i = 0; i < Rows.Count; i++)
+            // 数据行背景：合并区域默认不填充奇偶色（避免跨行文字压在色带分界上），
+            // 需要背景时通过 TableCell.BackColor 指定
+            for (int r = 0; r < Rows.Count; r++)
             {
-                var bgColor = (i % 2 == 0) ? ParseColor(OddRowBackColor) : ParseColor(EvenRowBackColor);
-                if (bgColor.Alpha > 0)
+                var bgColor = (r % 2 == 0) ? ParseColor(OddRowBackColor) : ParseColor(EvenRowBackColor);
+                float rowY = tableY + (r + 1) * RowHeight;
+
+                // 连续的普通格子按段填充，减少相邻矩形接缝
+                float? runStart = null;
+                float runWidth = 0f;
+
+                for (int c = 0; c < Columns.Count; c++)
                 {
-                    float rowY = tableY + (i + 1) * RowHeight;
-                    using var paint = new SKPaint { Color = bgColor, Style = SKPaintStyle.Fill, IsAntialias = true };
-                    canvas.DrawRect(tableX, rowY, Width, RowHeight, paint);
+                    bool isCovered = covered[r + 1, c];
+                    bool isMerged = colSpan[r + 1, c] > 1 || rowSpan[r + 1, c] > 1;
+
+                    if (!isCovered && !isMerged)
+                    {
+                        runStart ??= tableX + SumWidths(colWidths, 0, c);
+                        runWidth += colWidths[c];
+                        continue;
+                    }
+
+                    FlushRun(canvas, bgColor, runStart, rowY, runWidth);
+                    runStart = null;
+                    runWidth = 0f;
+
+                    // 合并锚点：显式指定了 BackColor 才填充整个合并区域
+                    if (isMerged)
+                    {
+                        var cell = ResolveCell(Rows[r], Columns[c]);
+                        if (!string.IsNullOrEmpty(cell.BackColor))
+                        {
+                            float mx = tableX + SumWidths(colWidths, 0, c);
+                            float mw = SumWidths(colWidths, c, colSpan[r + 1, c]);
+                            float mh = RowHeight * rowSpan[r + 1, c];
+                            using var mp = new SKPaint
+                            {
+                                Color = ParseColor(cell.BackColor),
+                                Style = SKPaintStyle.Fill,
+                                IsAntialias = true
+                            };
+                            canvas.DrawRect(mx, rowY, mw, mh, mp);
+                        }
+                    }
                 }
+
+                FlushRun(canvas, bgColor, runStart, rowY, runWidth);
             }
+        }
+
+        /// <summary>填充一段连续的奇偶行背景（透明或零宽时跳过）。</summary>
+        private void FlushRun(SKCanvas canvas, SKColor color, float? x, float y, float w)
+        {
+            if (x is null || w <= 0 || color.Alpha == 0) return;
+            using var paint = new SKPaint { Color = color, Style = SKPaintStyle.Fill, IsAntialias = true };
+            canvas.DrawRect(x.Value, y, w, RowHeight, paint);
+        }
+
+        /// <summary>从 start 起 count 列的宽度之和。</summary>
+        private static float SumWidths(float[] colWidths, int start, int count)
+        {
+            float sum = 0f;
+            for (int i = 0; i < count; i++) sum += colWidths[start + i];
+            return sum;
         }
 
         /// <summary>
         /// 绘制外边框和内部网格线。
         /// </summary>
-        private void DrawGridLines(SKCanvas canvas, float tableX, float tableY, float tableW, float tableH, float[] colWidths)
+        private void DrawGridLines(SKCanvas canvas, float tableX, float tableY, float tableW, float tableH,
+            float[] colWidths, int dataRows,
+            bool[,] covered, int[,] colSpan, int[,] rowSpan, int[,] anchorR, int[,] anchorC)
         {
             var gridClr = ParseColor(GridColor);
-            int totalRows = 1 + Rows.Count;
+            int nCols = Columns.Count;
+            int nRows = 1 + dataRows;   // 行 0 = 表头
 
             // 外边框
             if (BorderWidthMm > 0)
@@ -288,7 +393,6 @@ namespace PrintLibrary.Model
                 canvas.DrawRect(tableX, tableY, tableW, tableH, borderPaint);
             }
 
-            // 内部网格线
             if (GridLineWidthMm <= 0) return;
 
             using var gridPaint = new SKPaint
@@ -299,19 +403,46 @@ namespace PrintLibrary.Model
                 IsAntialias = true
             };
 
-            // 水平线（表头与数据行之间、数据行之间）
-            for (int row = 1; row < totalRows; row++)
+            // 每列左边界 x 坐标
+            float[] colLeftX = new float[nCols];
+            float acc = tableX;
+            for (int c = 0; c < nCols; c++) { colLeftX[c] = acc; acc += colWidths[c]; }
+
+            // 水平内部分割线：逐行边界、逐列分段，避让纵向合并单元格
+            // 最后一列的分段右边界是表格右缘（colLeftX 只有每列左边界）
+            for (int rb = 1; rb < nRows; rb++)
             {
-                float lineY = tableY + row * RowHeight;
-                canvas.DrawLine(tableX, lineY, tableX + tableW, lineY, gridPaint);
+                float lineY = tableY + rb * RowHeight;
+                for (int c = 0; c < nCols; c++)
+                {
+                    // 上方单元格是否纵向跨过此边界（即该边界位于其合并区域内）
+                    int ar = anchorR[rb - 1, c], ac = anchorC[rb - 1, c];
+                    int rs = rowSpan[ar, ac];
+                    bool crosses = (ar <= rb - 1 && ar + rs - 1 >= rb);
+                    if (crosses) continue;
+                    float x1 = colLeftX[c];
+                    float x2 = (c == nCols - 1) ? tableX + tableW : colLeftX[c + 1];
+                    canvas.DrawLine(x1, lineY, x2, lineY, gridPaint);
+                }
             }
 
-            // 垂直线（列之间）
-            float colX = tableX;
-            for (int col = 0; col < colWidths.Length - 1; col++)
+            // 垂直内部分割线：逐列边界、逐行分段
+            // 只需判断左侧单元格是否横向跨过此边界（RowSpan 不影响垂直线，
+            // 合并格的左右边框仍要沿整个合并高度绘制）
+            // 最后一行的分段下边界是表格底缘
+            for (int cb = 0; cb < nCols - 1; cb++)
             {
-                colX += colWidths[col];
-                canvas.DrawLine(colX, tableY, colX, tableY + tableH, gridPaint);
+                float lineX = colLeftX[cb] + colWidths[cb];   // = colLeftX[cb + 1]
+                for (int r = 0; r < nRows; r++)
+                {
+                    int ar = anchorR[r, cb], ac = anchorC[r, cb];
+                    int cs = colSpan[ar, ac];
+                    bool crossesH = (ac <= cb && ac + cs - 1 >= cb + 1);
+                    if (crossesH) continue;
+                    float topY = tableY + r * RowHeight;
+                    float botY = (r == nRows - 1) ? tableY + tableH : tableY + (r + 1) * RowHeight;
+                    canvas.DrawLine(lineX, topY, lineX, botY, gridPaint);
+                }
             }
         }
 
@@ -330,67 +461,100 @@ namespace PrintLibrary.Model
                 Style = SKPaintStyle.Fill
             };
 
-            float colX = tableX;
+            // 表头 ColSpan：仅锚点列绘制文字，被合并列跳过
+            bool[] headerCovered = new bool[Columns.Count];
             for (int i = 0; i < Columns.Count; i++)
             {
-                var rect = new SKRect(colX, tableY, colX + colWidths[i], tableY + RowHeight);
+                if (headerCovered[i]) continue;
+                int cs = Math.Clamp(Columns[i].HeaderColSpan, 1, Columns.Count - i);
+                for (int dc = 1; dc < cs; dc++) headerCovered[i + dc] = true;
+
+                float w = 0f;
+                for (int dc = 0; dc < cs; dc++) w += colWidths[i + dc];
+                var rect = new SKRect(tableX, tableY, tableX + w, tableY + RowHeight);
                 DrawCellText(canvas, font, paint, Columns[i].Header, rect, Columns[i].Align);
-                colX += colWidths[i];
+                tableX += w;   // 注意：此处移动的是局部副本 tableX
             }
         }
 
         /// <summary>
         /// 绘制数据行文字。
         /// </summary>
-        private void DrawRowTexts(SKCanvas canvas, float tableX, float tableY, float[] colWidths)
+        private void DrawRowTexts(SKCanvas canvas, float tableX, float tableY, float[] colWidths,
+            bool[,] covered, int[,] colSpan, int[,] rowSpan, int[,] anchorR, int[,] anchorC)
         {
-            using var typeface = LoadTypeface(false);
+            int nCols = Columns.Count;
             float fontSizeMm = RowFontSize * (25.4f / 72f);
-            using var font = new SKFont(typeface, fontSizeMm);
-            using var paint = new SKPaint
-            {
-                Color = ParseColor(RowForeColor),
-                IsAntialias = true,
-                Style = SKPaintStyle.Fill
-            };
 
-            for (int rowIdx = 0; rowIdx < Rows.Count; rowIdx++)
+            for (int r = 0; r < Rows.Count; r++)
             {
-                var row = Rows[rowIdx];
-                float rowY = tableY + (rowIdx + 1) * RowHeight;
+                float rowY = tableY + (r + 1) * RowHeight;
                 float colX = tableX;
 
-                for (int colIdx = 0; colIdx < Columns.Count; colIdx++)
+                for (int c = 0; c < nCols; c++)
                 {
-                    var col = Columns[colIdx];
-                    string cellText = GetCellValue(row, col);
+                    float cellW = colWidths[c];
+                    // 行 0 是表头，数据行 r 对应合并图中的第 r+1 行
+                    if (covered[r + 1, c])
+                    {
+                        colX += cellW;
+                        continue;   // 被合并覆盖的格子，不绘制
+                    }
 
-                    var rect = new SKRect(colX, rowY, colX + colWidths[colIdx], rowY + RowHeight);
-                    DrawCellText(canvas, font, paint, cellText, rect, col.Align);
-                    colX += colWidths[colIdx];
+                    var cell = ResolveCell(Rows[r], Columns[c]);
+                    int cs = colSpan[r + 1, c];
+                    int rs = rowSpan[r + 1, c];
+
+                    // 合并区域矩形（跨 cs 列、rs 行）
+                    float w = 0f;
+                    for (int dc = 0; dc < cs; dc++) w += colWidths[c + dc];
+                    float h = RowHeight * rs;
+                    var rect = new SKRect(colX, rowY, colX + w, rowY + h);
+
+                    var color = ParseColor(cell.ForeColor ?? RowForeColor);
+                    bool bold = cell.Bold ?? false;
+                    using var tf = LoadTypeface(bold);
+                    using var font = new SKFont(tf, fontSizeMm);
+                    using var paint = new SKPaint
+                    {
+                        Color = color,
+                        IsAntialias = true,
+                        Style = SKPaintStyle.Fill
+                    };
+                    DrawCellText(canvas, font, paint, cell.Text, rect, cell.Align);
+
+                    colX += cellW;
                 }
             }
         }
 
         /// <summary>
         /// 在单元格矩形内绘制文字（含对齐和垂直居中）。
+        /// 支持 \n / \r\n 换行。
         /// </summary>
         private static void DrawCellText(SKCanvas canvas, SKFont font, SKPaint paint,
             string text, SKRect cellRect, TableColumnAlign align)
         {
+            text = text.Replace("\r\n", "\n").Replace('\r', '\n');
             if (string.IsNullOrEmpty(text)) return;
 
             canvas.Save();
             canvas.ClipRect(cellRect);
 
             var metrics = font.Metrics;
+            float lineH = metrics.Descent - metrics.Ascent;
+            float lineSpacing = lineH * 1.12f;
+
+            string[] lines = text.Split('\n');
+            float span = lines.Length == 1 ? lineH : (lines.Length - 1) * lineSpacing + lineH;
+            float firstBaseline = cellRect.Top + (cellRect.Height - span) / 2f - metrics.Ascent;
+
             float baseX = align switch
             {
                 TableColumnAlign.Center => cellRect.MidX,
-                TableColumnAlign.Right  => cellRect.Right - 1f, // 1mm 右内边距
-                _                       => cellRect.Left + 1f    // 1mm 左内边距
+                TableColumnAlign.Right  => cellRect.Right - 1f,
+                _                       => cellRect.Left + 1f
             };
-            float baseY = cellRect.Top + (cellRect.Height - (metrics.Descent - metrics.Ascent)) / 2f - metrics.Ascent;
 
             var textAlign = align switch
             {
@@ -399,22 +563,120 @@ namespace PrintLibrary.Model
                 _                       => SKTextAlign.Left
             };
 
-            canvas.DrawText(text, baseX, baseY, textAlign, font, paint);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                float lineY = firstBaseline + i * lineSpacing;
+                canvas.DrawText(lines[i], baseX, lineY, textAlign, font, paint);
+            }
+
             canvas.Restore();
         }
 
         /// <summary>
         /// 从数据行字典中获取格式化后的单元格文本。
         /// </summary>
-        private static string GetCellValue(Dictionary<string, object?> row, TableColumn col)
+        /// <summary>
+        /// 解析单元格为统一结构，支持普通值（按列 Format 自动格式化）与
+        /// <see cref="TableCell"/>（自带跨列/跨行/对齐/颜色/加粗）。
+        /// </summary>
+        internal ResolvedCell ResolveCell(Dictionary<string, object?> row, TableColumn col)
         {
             if (!row.TryGetValue(col.Field, out var value) || value is null)
-                return string.Empty;
+                return new ResolvedCell { Text = string.Empty, Align = col.Align };
 
-            if (!string.IsNullOrEmpty(col.Format) && value is IFormattable formattable)
-                return formattable.ToString(col.Format, null);
+            if (value is TableCell tc)
+            {
+                return new ResolvedCell
+                {
+                    Text = tc.Text ?? string.Empty,
+                    ColSpan = tc.ColSpan,
+                    RowSpan = tc.RowSpan,
+                    Align = tc.Align ?? col.Align,
+                    ForeColor = tc.ForeColor,
+                    BackColor = tc.BackColor,
+                    Bold = tc.Bold
+                };
+            }
 
-            return value.ToString() ?? string.Empty;
+            string text = (!string.IsNullOrEmpty(col.Format) && value is IFormattable f)
+                ? f.ToString(col.Format, null)
+                : value.ToString() ?? string.Empty;
+            return new ResolvedCell { Text = text, Align = col.Align };
+        }
+
+        /// <summary>
+        /// 构建合并单元格占用图。行 0 为表头（仅支持 ColSpan），
+        /// 行 1..N 为数据行（支持 ColSpan + RowSpan）。
+        /// <para>covered[r,c] 为 true 表示该格被其它单元格合并覆盖（自身不绘制）；
+        /// anchorR/anchorC 记录每格所属合并区的左上角锚点，便于网格线避让判断。</para>
+        /// </summary>
+        internal void BuildSpanMaps(float[] colWidths,
+            out bool[,] covered, out int[,] colSpan, out int[,] rowSpan,
+            out int[,] anchorR, out int[,] anchorC)
+        {
+            int nCols = Columns.Count;
+            int nRows = 1 + Rows.Count;   // 行 0 = 表头
+            covered = new bool[nRows, nCols];
+            colSpan = new int[nRows, nCols];
+            rowSpan = new int[nRows, nCols];
+            anchorR = new int[nRows, nCols];
+            anchorC = new int[nRows, nCols];
+
+            for (int r = 0; r < nRows; r++)
+                for (int c = 0; c < nCols; c++)
+                {
+                    colSpan[r, c] = 1;
+                    rowSpan[r, c] = 1;
+                    anchorR[r, c] = r;
+                    anchorC[r, c] = c;
+                }
+
+            // 表头行（r = 0）：仅 ColSpan
+            for (int c = 0; c < nCols; c++)
+            {
+                if (covered[0, c]) continue;
+                int cs = Math.Clamp(Columns[c].HeaderColSpan, 1, nCols - c);
+                colSpan[0, c] = cs;
+                for (int dc = 1; dc < cs; dc++)
+                    covered[0, c + dc] = true;
+            }
+
+            // 数据行（r = 1..nRows-1）
+            for (int r = 1; r < nRows; r++)
+            {
+                int dataR = r - 1;
+                for (int c = 0; c < nCols; c++)
+                {
+                    if (covered[r, c]) continue;
+                    var cell = ResolveCell(Rows[dataR], Columns[c]);
+                    int cs = Math.Clamp(cell.ColSpan, 1, nCols - c);
+                    int rs = Math.Clamp(cell.RowSpan, 1, nRows - r);
+                    colSpan[r, c] = cs;
+                    rowSpan[r, c] = rs;
+                    for (int dr = 0; dr < rs; dr++)
+                        for (int dc = 0; dc < cs; dc++)
+                            if (dr != 0 || dc != 0)
+                            {
+                                covered[r + dr, c + dc] = true;
+                                anchorR[r + dr, c + dc] = r;
+                                anchorC[r + dr, c + dc] = c;
+                            }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 解析后的单元格统一结构（供绘制时取用）。
+        /// </summary>
+        internal struct ResolvedCell
+        {
+            public string Text;
+            public int ColSpan;
+            public int RowSpan;
+            public TableColumnAlign Align;
+            public string? ForeColor;
+            public string? BackColor;
+            public bool? Bold;
         }
 
         /// <summary>

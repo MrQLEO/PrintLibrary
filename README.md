@@ -61,6 +61,30 @@ printer.Print(template, data, new PrintOptions { PrinterName = "打印机名称"
 
 ---
 
+## 示例效果
+
+> 以下截图均由 `PrintLibrary.Demo` 运行后自动生成，内容均为**虚构示例数据**，产物位于 `PrintLibrary.Demo/bin/Debug/net8.0/output/`。
+
+### 装箱 / 报验单（A4 横向）
+
+完整复刻的 A4 装箱/报验单：页眉双列信息、Code128 条码、明细表格、送货总箱数与签字区。
+
+![装箱/报验单示例](docs/packing-list.png)
+
+### 表格合并单元格（ColSpan / RowSpan）
+
+跨行/跨列合并单元格示例（合并区域默认不填充背景，可通过 `TableCell.BackColor` 配置）。
+
+![合并单元格示例](docs/table-span.png)
+
+### 纯表格自动布局
+
+最简单的纯表格打印示例。
+
+![纯表格示例](docs/parts-table.png)
+
+---
+
 ## 项目结构
 
 ```

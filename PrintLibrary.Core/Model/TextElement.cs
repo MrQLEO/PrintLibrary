@@ -117,14 +117,22 @@ namespace PrintLibrary.Model
             var rect = new SKRect(X, Y, X + Width, Y + Height);
 
             // 6. 保存画布状态，如需裁剪则启用剪裁区域
+            // 宽或高为 0 时矩形退化：ClipRect 会裁掉全部内容（与 PdfSharpPrinter 中带 padding 的行为不一致）。
+            // 常见写法是只设 X/Y/Width 表示单行，此时不裁剪。
             canvas.Save();
-            if (ClipContent)
+            bool clipToBounds = ClipContent && rect.Width > 0 && rect.Height > 0;
+            if (clipToBounds)
                 canvas.ClipRect(rect);
 
             // 7. 绘制文字
+            string normalized = NormalizeNewlines(resolvedText);
             if (WordWrap)
             {
-                DrawWrapped(canvas, font, paint, textAlign, resolvedText, rect);
+                DrawWrapped(canvas, font, paint, textAlign, normalized, rect);
+            }
+            else if (normalized.IndexOf('\n') >= 0)
+            {
+                DrawMultiline(canvas, font, paint, textAlign, normalized, rect, clipToBounds);
             }
             else
             {
@@ -140,10 +148,41 @@ namespace PrintLibrary.Model
                 var metrics = font.Metrics;
                 float baseY = rect.Top - metrics.Ascent;
 
-                canvas.DrawText(resolvedText, baseX, baseY, textAlign, font, paint);
+                canvas.DrawText(normalized, baseX, baseY, textAlign, font, paint);
             }
 
             canvas.Restore();
+        }
+
+        /// <summary>将 \r\n、单独 \r 规范为 \n，便于统一处理换行。</summary>
+        private static string NormalizeNewlines(string text) =>
+            text.Replace("\r\n", "\n").Replace('\r', '\n');
+
+        /// <summary>多行绘制（显式换行，不含自动按宽度折行）。</summary>
+        private static void DrawMultiline(
+            SKCanvas canvas, SKFont font, SKPaint paint, SKTextAlign textAlign,
+            string text, SKRect rect, bool clipToBounds)
+        {
+            var metrics = font.Metrics;
+            float lineSpacing = (metrics.Descent - metrics.Ascent) * 1.15f;
+            float bottomLimit = rect.Height > 0 ? rect.Bottom : float.MaxValue;
+            string[] lines = text.Split('\n');
+
+            float baseX = textAlign switch
+            {
+                SKTextAlign.Center => rect.MidX,
+                SKTextAlign.Right  => rect.Right,
+                _                    => rect.Left
+            };
+
+            float y = rect.Top - metrics.Ascent;
+            foreach (var line in lines)
+            {
+                if (clipToBounds && rect.Height > 0 && y - metrics.Ascent > rect.Bottom + 0.01f)
+                    break;
+                canvas.DrawText(line, baseX, y, textAlign, font, paint);
+                y += lineSpacing;
+            }
         }
 
         // ── 字体构建 ──────────────────────────────────────────────────────
@@ -177,12 +216,12 @@ namespace PrintLibrary.Model
 
             // 优先级 3：如果指定字体是纯西文字体且文本包含 CJK 字符，回退到 CJK 字体
             // 避免在用户只写英文时强制替换字体，导致 PDF 嵌入不必要的 CJK 字体子集
-            if (typeface is not null && ContainsCjkCharacter(text) && IsWesternOnlyFont(typeface))
+            if (typeface is not null && (ContainsCjkCharacter(text) && IsWesternOnlyFont(typeface)) || (ContainsCjkCharacter(text) && typeface?.FamilyName == null))
             {
                 var style = SKFontStyle.Normal;
-                if (Bold && Italic)  style = SKFontStyle.BoldItalic;
-                else if (Bold)       style = SKFontStyle.Bold;
-                else if (Italic)     style = SKFontStyle.Italic;
+                if (Bold && Italic) style = SKFontStyle.BoldItalic;
+                else if (Bold) style = SKFontStyle.Bold;
+                else if (Italic) style = SKFontStyle.Italic;
 
                 var cjkTypeface = TryGetCjkTypeface(style);
                 if (cjkTypeface is not null)
@@ -283,9 +322,9 @@ namespace PrintLibrary.Model
             SKCanvas canvas, SKFont font, SKPaint paint,
             SKTextAlign textAlign, string text, SKRect rect)
         {
+            text = NormalizeNewlines(text);
             var metrics = font.Metrics;
-            float lineHeight  = metrics.Descent - metrics.Ascent;
-            float lineSpacing = lineHeight * 1.2f;
+            float lineSpacing = (metrics.Descent - metrics.Ascent) * 1.2f;
 
             float x = textAlign switch
             {
@@ -295,22 +334,55 @@ namespace PrintLibrary.Model
             };
             float y = rect.Top - metrics.Ascent; // 首行 baseline
 
-            // 按空格/字符逐词拆分，贪心拼接不超过宽度的行
-            var words = text.Split(' ');
+            // 高度为 0 时表示未限制垂直范围，避免首行 baseline 已低于 rect.Bottom 导致一行都不画
+            float bottomLimit = rect.Height > 0 ? rect.Bottom : float.MaxValue;
+            bool hasWidthLimit = rect.Width > 0;
+
+            var paragraphs = text.Split('\n');
+            for (int p = 0; p < paragraphs.Length; p++)
+            {
+                if (y > bottomLimit) break;
+
+                var para = paragraphs[p];
+                if (para.Length == 0)
+                {
+                    y += lineSpacing * 0.35f;
+                    continue;
+                }
+
+                if (p > 0)
+                    y += lineSpacing;
+
+                DrawWrappedParagraph(canvas, font, paint, textAlign, para, rect, ref y, lineSpacing, bottomLimit, hasWidthLimit);
+            }
+        }
+
+        /// <summary>对单段文字按空格折行（不含段落内的 \n，已由上层拆分）。</summary>
+        private static void DrawWrappedParagraph(
+            SKCanvas canvas, SKFont font, SKPaint paint, SKTextAlign textAlign,
+            string para, SKRect rect, ref float y, float lineSpacing, float bottomLimit, bool hasWidthLimit)
+        {
+            float x = textAlign switch
+            {
+                SKTextAlign.Center => rect.MidX,
+                SKTextAlign.Right  => rect.Right,
+                _                  => rect.Left
+            };
+
+            var words = para.Split(' ');
             string currentLine = "";
 
             foreach (var word in words)
             {
                 string testLine = string.IsNullOrEmpty(currentLine) ? word : currentLine + " " + word;
-                float w = font.MeasureText(testLine);
+                float w = hasWidthLimit ? font.MeasureText(testLine) : 0f;
 
-                if (w > rect.Width && !string.IsNullOrEmpty(currentLine))
+                if (hasWidthLimit && w > rect.Width && !string.IsNullOrEmpty(currentLine))
                 {
-                    // 当前行已满，先绘制再换行
                     canvas.DrawText(currentLine, x, y, textAlign, font, paint);
-                    y           += lineSpacing;
-                    currentLine  = word;
-                    if (y > rect.Bottom) break; // 超出区域，停止绘制
+                    y += lineSpacing;
+                    currentLine = word;
+                    if (y > bottomLimit) return;
                 }
                 else
                 {
@@ -318,8 +390,7 @@ namespace PrintLibrary.Model
                 }
             }
 
-            // 绘制最后一行
-            if (!string.IsNullOrEmpty(currentLine) && y <= rect.Bottom)
+            if (!string.IsNullOrEmpty(currentLine) && y <= bottomLimit)
                 canvas.DrawText(currentLine, x, y, textAlign, font, paint);
         }
 
